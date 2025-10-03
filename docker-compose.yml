@@ -38,6 +38,11 @@ services:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USER: guest
       RABBITMQ_PASS: guest
+      DATASET_DIR: /app/archive
+      FACE_VERBOSE: "1"          # logs extras
+      # FACE_FORCE_SYNTHETIC: "1" # descomente para ignorar dataset
+    volumes:
+      - ./consumer-face/archive:/app/archive:ro
     restart: unless-stopped
 
   consumer-team:

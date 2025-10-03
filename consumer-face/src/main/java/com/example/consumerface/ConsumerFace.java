@@ -7,9 +7,12 @@ import javax.imageio.ImageIO;
 import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.nio.file.*;
 import java.util.*;
 import java.util.List;
-import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import smile.classification.KNN;
 
@@ -25,14 +28,20 @@ public class ConsumerFace {
 
     // modelo KNN
     private static KNN<double[]> knnModel;
+    private static String modelTag = "SYN";          // DATASET ou SYN
+    private static boolean usingDataset = false;
+    private static boolean verbose = false;
 
     public static void main(String[] args) throws Exception {
-        // treina modelo
-        trainModel();
-
+        // REMOVIDO: trainModel(); -> agora dependemos da variável de ambiente
         String host = System.getenv().getOrDefault("RABBITMQ_HOST", "localhost");
         String user = System.getenv().getOrDefault("RABBITMQ_USER", "guest");
         String pass = System.getenv().getOrDefault("RABBITMQ_PASS", "guest");
+        String datasetDir = System.getenv().getOrDefault("DATASET_DIR", "./archive");
+        verbose = "1".equals(System.getenv().getOrDefault("FACE_VERBOSE","0"));
+        boolean forceSynthetic = "1".equals(System.getenv().getOrDefault("FACE_FORCE_SYNTHETIC","0"));
+        // treina modelo (dataset real ou fallback)
+        trainModel(datasetDir, forceSynthetic);
 
         ConnectionFactory factory = new ConnectionFactory();
         factory.setHost(host);
@@ -47,7 +56,7 @@ public class ConsumerFace {
         channel.queueDeclare(QUEUE, true, false, false, null);
         channel.queueBind(QUEUE, EXCHANGE, "face");
 
-        System.out.println("ConsumerFace waiting for messages...");
+        System.out.println("ConsumerFace waiting for messages... (model=" + modelTag + ")");
 
         DeliverCallback deliverCallback = (consumerTag, delivery) -> {
             try {
@@ -56,13 +65,14 @@ public class ConsumerFace {
                 BufferedImage img = decodeImage(payload.image);
                 double[] features = extractFeatures(img);
 
-                int pred = knnModel.predict(features); // 1 = happy, 0 = sad
+                int pred = knnModel.predict(features);
                 String label = pred == 1 ? "HAPPY" : "SAD";
 
                 // simulate slow processing (longer than generator interval)
                 Thread.sleep(1000);
 
-                System.out.println("[Face] id=" + payload.id + " -> predicted: " + label);
+                System.out.println("[Face][" + modelTag + "] id=" + payload.id + " -> predicted: " + label +
+                        (verbose ? (" features=" + Arrays.toString(features)) : ""));
                 // ack
                 channel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
             } catch (Exception e) {
@@ -74,8 +84,47 @@ public class ConsumerFace {
         channel.basicConsume(QUEUE, false, deliverCallback, consumerTag -> {});
     }
 
-    static void trainModel() {
-        // gerar dataset sintético (mesma lógica de face do generator)
+    // Substitui a antiga trainModel()
+    static void trainModel(String datasetDir, boolean forceSynthetic) {
+        if (!forceSynthetic) {
+            try {
+                Optional<TrainTestData> dsOpt = loadLocalDataset(datasetDir);
+                if (dsOpt.isPresent()) {
+                    TrainTestData ds = dsOpt.get();
+                    knnModel = KNN.fit(ds.xTrain, ds.yTrain, 3);
+                    usingDataset = true;
+                    modelTag = "DATASET";
+                    // avaliação + matriz confusão
+                    int correct = 0;
+                    int[][] cm = new int[2][2]; // [pred][real] 0=angry 1=happy
+                    for (int i = 0; i < ds.xTest.length; i++) {
+                        int yTrue = ds.yTest[i];
+                        int yPred = knnModel.predict(ds.xTest[i]);
+                        if (yPred == yTrue) correct++;
+                        cm[yPred][yTrue]++;
+                    }
+                    double acc = ds.xTest.length == 0 ? 0.0 : correct / (double) ds.xTest.length;
+                    System.out.println("Dataset carregado de: " + datasetDir);
+                    System.out.println("Imagens: happy=" + ds.happyCount + " angry=" + ds.angryCount);
+                    System.out.println("Split: train=" + ds.xTrain.length + " test=" + ds.xTest.length);
+                    System.out.println(String.format("Acurácia teste=%.3f", acc));
+                    System.out.println("Matriz de confusão (pred x real) [angry,happy]:");
+                    System.out.println(" pred=angry -> [" + cm[0][0] + " " + cm[0][1] + "]");
+                    System.out.println(" pred=happy -> [" + cm[1][0] + " " + cm[1][1] + "]");
+                    if (verbose && ds.sampleFeature != null) {
+                        System.out.println("Exemplo de feature (primeira imagem): " + Arrays.toString(ds.sampleFeature));
+                    }
+                    return;
+                } else {
+                    System.out.println("Dataset não encontrado/vazio em " + datasetDir + " -> fallback sintético.");
+                }
+            } catch (Exception e) {
+                System.out.println("Falha ao usar dataset real: " + e.getMessage() + " -> fallback sintético.");
+            }
+        } else {
+            System.out.println("FACE_FORCE_SYNTHETIC=1 -> ignorando dataset e usando sintético.");
+        }
+        // Fallback sintético (código original adaptado)
         List<double[]> X = new ArrayList<>();
         List<Integer> Y = new ArrayList<>();
         int N = 400;
@@ -90,7 +139,70 @@ public class ConsumerFace {
         double[][] xArr = X.toArray(new double[0][]);
         int[] yArr = Y.stream().mapToInt(i->i).toArray();
         knnModel = KNN.fit(xArr, yArr, 3);
-        System.out.println("Face model trained (KNN).");
+        modelTag = "SYN";
+        usingDataset = false;
+        System.out.println("Face model trained (synthetic fallback). Samples=" + N);
+    }
+
+    // Carrega dataset local (happy=1, angry=0). Retorna Optional vazio se não existir.
+    static Optional<TrainTestData> loadLocalDataset(String baseDir) throws IOException {
+        Path base = Paths.get(baseDir);
+        Path happyDir = base.resolve("happy");
+        Path angryDir = base.resolve("angry");
+        if (!Files.isDirectory(happyDir) || !Files.isDirectory(angryDir)) {
+            return Optional.empty();
+        }
+
+        List<LabeledFeature> samples = new ArrayList<>();
+        int[] counters = new int[2];
+        loadImagesFromDir(happyDir, 1, samples, counters);
+        loadImagesFromDir(angryDir, 0, samples, counters);
+
+        if (samples.isEmpty()) return Optional.empty();
+
+        // embaralha
+        Collections.shuffle(samples, new Random(42));
+
+        int split = (int) Math.round(samples.size() * 0.8);
+        List<LabeledFeature> train = samples.subList(0, split);
+        List<LabeledFeature> test = samples.subList(split, samples.size());
+
+        double[][] xTrain = train.stream().map(lf -> lf.features).toArray(double[][]::new);
+        int[] yTrain = train.stream().mapToInt(lf -> lf.label).toArray();
+        double[][] xTest = test.stream().map(lf -> lf.features).toArray(double[][]::new);
+        int[] yTest = test.stream().mapToInt(lf -> lf.label).toArray();
+
+        TrainTestData ttd = new TrainTestData(xTrain, yTrain, xTest, yTest);
+        ttd.happyCount = counters[1];
+        ttd.angryCount = counters[0];
+        ttd.sampleFeature = samples.get(0).features;
+        return Optional.of(ttd);
+    }
+
+    // === (RESTAURADO) método original de carregamento sem contadores ===
+    static void loadImagesFromDir(Path dir, int label, List<LabeledFeature> out) throws IOException {
+        if (!Files.isDirectory(dir)) return;
+        try (Stream<Path> st = Files.walk(dir)) {
+            for (Path p : st.filter(Files::isRegularFile)
+                    .filter(pp -> {
+                        String n = pp.getFileName().toString().toLowerCase();
+                        return n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".png");
+                    }).collect(Collectors.toList())) {
+                try {
+                    BufferedImage img = ImageIO.read(p.toFile());
+                    if (img == null) continue;
+                    double[] f = extractFeatures(img);
+                    out.add(new LabeledFeature(f, label));
+                } catch (Exception ignore) {}
+            }
+        }
+    }
+
+    // === Sobrecarga com contadores corrigida ===
+    static void loadImagesFromDir(Path dir, int label, List<LabeledFeature> out, int[] counters) throws IOException {
+        int before = out.size();
+        loadImagesFromDir(dir, label, out); // usa método base
+        counters[label] += (out.size() - before);
     }
 
     // --- Image utilities (same rules as generator but local) ---
@@ -148,6 +260,22 @@ public class ConsumerFace {
         double redRatio = (sumR) / (sumR + sumG + sumB + 1e-9);
 
         return new double[] { avgBrightness, lowerUpperDiff, redRatio };
+    }
+
+    static class LabeledFeature {
+        double[] features;
+        int label;
+        LabeledFeature(double[] f, int l) { this.features = f; this.label = l; }
+    }
+
+    static class TrainTestData {
+        double[][] xTrain; int[] yTrain;
+        double[][] xTest; int[] yTest;
+        int happyCount; int angryCount;
+        double[] sampleFeature;
+        TrainTestData(double[][] xT, int[] yT, double[][] xV, int[] yV) {
+            this.xTrain = xT; this.yTrain = yT; this.xTest = xV; this.yTest = yV;
+        }
     }
 
     static class MessagePayload {
