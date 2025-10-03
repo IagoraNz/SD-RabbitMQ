@@ -55,6 +55,11 @@ services:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USER: guest
       RABBITMQ_PASS: guest
+      TEAM_DATASET_DIR: /app/archive
+      TEAM_VERBOSE: "1"
+      # TEAM_FORCE_SYNTHETIC: "1"
+    volumes:
+      - ./consumer-team/archive:/app/archive:ro
     restart: unless-stopped
 
 networks:
