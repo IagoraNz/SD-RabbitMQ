@@ -55,8 +55,8 @@ public class MessageGenerator {
                     boolean happy = rnd.nextBoolean();
                     imageBytes = renderFaceImage(happy);
                 } else {
-                    // gera brasão (aleatoriamente 3 times)
-                    int team = rnd.nextInt(3); // 0=RED,1=BLUE,2=GREEN
+                    // agora 4 opções: 0=RED,1=BLUE,2=GREEN,3=COR
+                    int team = rnd.nextInt(4);
                     imageBytes = renderTeamImage(team);
                 }
 
@@ -111,26 +111,36 @@ public class MessageGenerator {
         BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = img.createGraphics();
 
-        // background neutral
         g.setColor(Color.WHITE);
         g.fillRect(0, 0, w, h);
 
-        // big stripe with team color and simple crest text
         Color c;
         String label;
         switch (team) {
             case 0: c = Color.RED; label = "RED"; break;
             case 1: c = Color.BLUE; label = "BLUE"; break;
-            default: c = Color.GREEN; label = "GREEN"; break;
+            case 2: c = Color.GREEN; label = "GREEN"; break;
+            case 3:
+                // COR: fundo totalmente preto ou totalmente branco (simples)
+                boolean black = rnd.nextBoolean();
+                g.setColor(black ? Color.BLACK : Color.WHITE);
+                g.fillRect(8, 8, w - 16, h - 16);
+                label = "COR";
+                g.setFont(new Font("Arial", Font.BOLD, 10));
+                g.setColor(black ? Color.WHITE : Color.BLACK); // contraste
+                g.drawString(label, 22, 55);
+                g.dispose();
+                return toPNGBytes(img);
+            default:
+                c = Color.GRAY; label = "UNK"; break;
         }
+
         g.setColor(c);
         g.fillRect(8, 8, w-16, h-16);
 
-        // small emblem circle
         g.setColor(Color.YELLOW);
         g.fillOval(22, 18, 20, 20);
 
-        // optional mini-label
         g.setColor(Color.BLACK);
         g.setFont(new Font("Arial", Font.BOLD, 10));
         g.drawString(label, 22, 55);
