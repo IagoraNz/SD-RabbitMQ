@@ -2,6 +2,8 @@
 
 Sistema de mensageria com **RabbitMQ** e consumidores em **Java + Smile**, para classificação de imagens e identificação de times.
 
+**Vídeo apresentativo:** https://youtu.be/TTuTfr9IGSU
+
 ## 🐳 Containers do Projeto
 
 O projeto possui 4 containers:
